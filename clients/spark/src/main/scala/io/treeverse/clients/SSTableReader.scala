@@ -113,7 +113,7 @@ class SSTableReader[Proto <: GeneratedMessage with scalapb.Message[Proto]] priva
   private val logger: Logger = LoggerFactory.getLogger(getClass.toString)
 
   private val fp = new java.io.RandomAccessFile(file, "r")
-  private val reader = new BlockReadableFile(fp)
+  private val reader = new BlockReadableFile(fp, file.getAbsolutePath)
 
   def this(sstableFilename: String, companion: GeneratedMessageCompanion[Proto], own: Boolean) =
     this(new java.io.File(sstableFilename), companion, own)

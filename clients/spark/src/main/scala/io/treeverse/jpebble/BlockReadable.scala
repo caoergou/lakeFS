@@ -21,7 +21,7 @@ trait BlockReadable {
     readBlock(offset, size).iterator
 }
 
-class BlockReadableFile(private val in: RandomAccessFile) extends BlockReadable with Closeable {
+class BlockReadableFile(private val in: RandomAccessFile, val filename: String = "<unknown>") extends BlockReadable with Closeable {
   if (in == null) {
     throw new IllegalArgumentException("null file");
   }
@@ -37,7 +37,7 @@ class BlockReadableFile(private val in: RandomAccessFile) extends BlockReadable 
       in.seek(offset)
       val bytesRead = in.read(buf)
       if (bytesRead != size) {
-        throw new java.io.IOException(s"Premature EOF $bytesRead < $size bytes")
+        throw new java.io.IOException(s"Premature EOF in $filename: $bytesRead < $size bytes")
       }
     }
     IndexedBytes.create(buf)

@@ -124,14 +124,14 @@ object BlockParser {
     checksum.update(buf.array, offset, length)
   }
 
-  def readEnd(bytes: Iterator[Byte]) =
-    if (bytes.hasNext) throw new BadFileFormatException("Input too long")
+  def readEnd(bytes: Iterator[Byte], filename: String = "<unknown>") =
+    if (bytes.hasNext) throw new BadFileFormatException(s"Input too long in $filename")
 
-  def readMagic(bytes: Iterator[Byte]) = {
+  def readMagic(bytes: Iterator[Byte], filename: String = "<unknown>") = {
     val magic = bytes.take(footerMagic.length).toArray
     if (magic.size < footerMagic.length) {
       throw new BadFileFormatException(
-        s"Bad magic ${magic.map("%02x".format(_)).mkString(" ")}: too short"
+        s"Bad magic ${magic.map("%02x".format(_)).mkString(" ")}: too short in $filename"
       )
     }
     val isMatch = magic
@@ -140,7 +140,7 @@ object BlockParser {
       .isEmpty
     if (!isMatch) {
       throw new BadFileFormatException(
-        s"Bad magic ${magic.map("%02x".format(_)).mkString(" ")}: wrong bytes"
+        s"Bad magic ${magic.map("%02x".format(_)).mkString(" ")}: wrong bytes in $filename"
       )
     }
   }
@@ -158,13 +158,13 @@ object BlockParser {
       (bytes.next() & 0xff) + 256L * ((bytes.next() & 0xff) + 256L * (bytes.next() & 0xff))
     )).toInt
 
-  def readUnsignedVarLong(bytes: Iterator[Byte]) = {
+  def readUnsignedVarLong(bytes: Iterator[Byte], filename: String = "<unknown>") = {
     val (continuedBytes, rest) = bytes.span((b: Byte) => (b & 0x80L) != 0)
     val (i, v) = continuedBytes
       .foldLeft((0, 0L))(
         { case ((i, v), b) => (i + 7, v | (b & 0x7f).toLong << i) }
       )
-    if (i > 63) throw new BadFileFormatException("Variable length quantity is too long")
+    if (i > 63) throw new BadFileFormatException(s"Variable length quantity is too long in $filename")
     v | (rest.next.toLong << i)
   }
 
@@ -184,17 +184,17 @@ object BlockParser {
   def readBlockHandle(bytes: Iterator[Byte]) =
     new BlockHandle(readUnsignedVarLong(bytes), readUnsignedVarLong(bytes))
 
-  def readFooter(bytes: Iterator[Byte]): IndexBlockHandles = {
+  def readFooter(bytes: Iterator[Byte], filename: String = "<unknown>"): IndexBlockHandles = {
     val countedBytes = new CountedIterator(bytes)
     val ret = new IndexBlockHandles(readBlockHandle(countedBytes), readBlockHandle(countedBytes))
     val skip = BlockParser.footerLength - countedBytes.count - footerMagic.length
     if (skip < 0) {
-      throw new BadFileFormatException("[I] Footer overflow (bad varint parser?)")
+      throw new BadFileFormatException(s"[I] Footer overflow (bad varint parser?) in $filename")
     }
 
     val after = bytes.drop(skip)
 
-    readMagic(after)
+    readMagic(after, filename)
 
     ret
   }
@@ -216,7 +216,7 @@ object BlockParser {
    *
    *  TODO(ariels): decompression.
    */
-  def startBlockParse(block: IndexedBytes): IndexedBytes = {
+  def startBlockParse(block: IndexedBytes, filename: String = "<unknown>"): IndexedBytes = {
     val crc = new CRC32C()
     update(crc, block.bytes, block.from, block.size - blockTrailerLen + 1)
     val computedCRC = fixupCRC(crc.getValue().toInt)
@@ -225,7 +225,7 @@ object BlockParser {
     )
     if (computedCRC != expectedCRC) {
       throw new BadFileFormatException(
-        "Bad CRC got %08x != stored %08x".format(computedCRC, expectedCRC)
+        s"Bad CRC in $filename: got %08x != stored %08x".format(computedCRC, expectedCRC)
       )
     }
     val compressionType = block(block.size - blockTrailerLen)
@@ -241,10 +241,10 @@ object BlockParser {
           IndexedBytes.create(uncompressed)
         } catch {
           case e: IOException =>
-            throw new BadFileFormatException(s"Bad Snappy-compressed data", e)
+            throw new BadFileFormatException(s"Bad Snappy-compressed data in $filename", e)
         }
       }
-      case _ => throw new BadFileFormatException(s"Unknown compression type $compressionType")
+      case _ => throw new BadFileFormatException(s"Unknown compression type $compressionType in $filename")
     }
   }
 
@@ -267,16 +267,20 @@ object BlockParser {
       file: BlockReadable,
       footer: IndexBlockHandles
   ): Map[Seq[Byte], Array[Byte]] = {
+    val filename = file match {
+      case fr: BlockReadableFile => fr.filename
+      case _ => "<unknown>"
+    }
     val metaIndex = {
       val bytes =
         file.readBlock(footer.metaIndex.offset, footer.metaIndex.size + BlockParser.blockTrailerLen)
-      val block = BlockParser.startBlockParse(bytes)
+      val block = BlockParser.startBlockParse(bytes, filename)
       BlockParser.parseDataBlock(block).toMap
     }
 
     val propBHIt = metaIndex("rocksdb.properties".getBytes).iterator
     val propBH = readBlockHandle(propBHIt)
-    readEnd(propBHIt)
+    readEnd(propBHIt, filename)
 
     {
       val bytes = file.readBlock(propBH.offset, propBH.size + BlockParser.blockTrailerLen)
@@ -288,14 +292,18 @@ object BlockParser {
   /** @return Iterator over all SSTable entries
    */
   def entryIterator(in: BlockReadable): Iterator[Entry] = {
+    val filename = in match {
+      case fr: BlockReadableFile => fr.filename
+      case _ => "<unknown>"
+    }
     if (in.length < BlockParser.footerLength) {
       throw new BadFileFormatException(
-        s"Block of length ${in.length} too short: not enough footer bytes"
+        s"Block of length ${in.length} too short: not enough footer bytes in $filename"
       )
     }
     val bytes = in.iterate(in.length - BlockParser.footerLength, BlockParser.footerLength)
-    val footer = BlockParser.readFooter(bytes)
-    BlockParser.readEnd(bytes)
+    val footer = BlockParser.readFooter(bytes, filename)
+    BlockParser.readEnd(bytes, filename)
 
     val blockIndexType = {
       val props = BlockParser.readProperties(in, footer)
